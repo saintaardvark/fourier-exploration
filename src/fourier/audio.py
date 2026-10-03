@@ -65,6 +65,22 @@ def test_tone(seconds: float = 1.0, sr: int = 44100) -> np.ndarray:
     return sine + square
 
 
+def fade(x: np.ndarray, sr: int, ms: float) -> np.ndarray:
+    """Raised-cosine fade in and out, so the clip's end meets its start.
+
+    The Fourier series treats the clip as one period of a loop; a jump at
+    the seam would otherwise show up as broadband junk.
+    """
+    width = min(int(sr * ms / 1000), len(x) // 2)
+    if width == 0:
+        return x
+    ramp = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, width))
+    out = x.copy()
+    out[:width] *= ramp
+    out[-width:] *= ramp[::-1]
+    return out
+
+
 def write(path: str, x: np.ndarray, sr: int) -> None:
     """Write a WAV as 32-bit float, so the file holds exactly what we computed."""
     sf.write(path, x, sr, subtype="FLOAT")

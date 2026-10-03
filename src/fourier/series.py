@@ -36,6 +36,13 @@ def resynth(coeffs: np.ndarray, n: int) -> np.ndarray:
     return np.fft.irfft(coeffs, n=n)
 
 
+def first_n(coeffs: np.ndarray, count: int) -> np.ndarray:
+    """Keep bins 0 .. count-1 and zero the rest: a brick-wall low-pass filter."""
+    kept = np.zeros_like(coeffs)
+    kept[:count] = coeffs[:count]
+    return kept
+
+
 def to_knobs(coeffs: np.ndarray, n: int, sr: int) -> Knobs:
     """Convert rfft output into amplitude/phase pairs for the cosine form.
 

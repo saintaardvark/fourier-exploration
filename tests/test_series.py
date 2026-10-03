@@ -39,3 +39,25 @@ def test_load_trims_and_mixes(tmp_path):
     assert got_sr == sr and len(x) == sr // 2
     assert np.allclose(x, 0.125)
     assert np.allclose(audio.load(str(path), channel="right")[0], -0.25)
+
+
+def test_first_n_is_a_low_pass():
+    sr = 8000
+    t = np.arange(sr) / sr
+    low, high = np.sin(2 * np.pi * 100 * t), np.sin(2 * np.pi * 1000 * t)
+    coeffs = series.analyse(low + high)
+    y = series.resynth(series.first_n(coeffs, 500), sr)  # bins 0..499 Hz
+    assert np.max(np.abs(y - low)) < 1e-9
+
+
+def test_first_n_all_is_exact():
+    x = np.random.default_rng(2).uniform(-1, 1, 1000)
+    coeffs = series.analyse(x)
+    assert np.allclose(series.resynth(series.first_n(coeffs, len(coeffs)), 1000), x)
+
+
+def test_fade_ends_at_zero_and_leaves_middle():
+    x = np.ones(1000)
+    y = audio.fade(x, sr=1000, ms=10)
+    assert y[0] == 0 and y[-1] == 0
+    assert np.all(y[10:-10] == 1)
