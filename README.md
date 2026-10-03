@@ -76,7 +76,7 @@ frames (STFT) → the core of a codec.
 | 1 | Synthetic tone; check the round trip is exact | `roundtrip` |
 | 2 | First-N sweep; hear the low-pass | `sweep --select first` |
 | 3 | Top-N sweep; hear smearing and pre-echo | `sweep --select top` |
-| 4 | Zero or randomise phases | |
+| 4 | Zero or randomise phases | `sweep --phase zero,random` |
 | 5 | Quantise to B bits per knob | |
 | 6 | STFT, top-N per frame; compare with step 3 | |
 | 7 | Stereo as an XY path; epicycle plot | |
@@ -121,6 +121,8 @@ Output: `out/roundtrip/`.
 
     uv run fourier sweep song.mp3 --seconds 5
     uv run fourier sweep song.mp3 --seconds 5 --select both --counts 50,500,5000
+    uv run fourier sweep song.mp3 --select top --counts 0.1%,1%,10%
+    uv run fourier sweep --test notes --select top --phase keep,zero,random
 
 `--select` picks which N coefficients to keep:
 
@@ -132,8 +134,30 @@ Output: `out/roundtrip/`.
 
 - `both`: run both, for comparison at the same N.
 
-Writes `<select>-<N>.wav` for each N, and (for clips up to 30 s)
-`progression-<select>.wav`: every step back to back, then the original.
+`--counts` takes whole numbers, percentages of all coefficients, or a mix:
+`100,0.1%,10%`.
+
+`--phase` replaces the phase of each kept coefficient, leaving its
+magnitude alone. Comma-separate several to compare them:
+
+- `keep` (default): unchanged.
+
+- `zero`: every cosine peaks at t = 0. Most of the energy lands in one
+  click at the loop seam, and the clip becomes a palindrome (each half
+  mirrors the other).
+
+- `random`: uniform random phases (`--seed` to vary). The same spectrum,
+  spread evenly through time: a wash with no onsets.
+
+Same energy, same spectrum, very different sound: phase is where the
+timing lives.
+
+Writes `<select>[-<phase>]-<N>.wav` for each N, and (for clips up to 30 s)
+`progression-<select>[-<phase>].wav`: every step back to back, then the
+original.
+
+The table's `peak` column turns red above 1.0; those WAVs are scaled
+down to peak 1.0 so they don't clip.
 
 - `--fade-ms`: fade the clip's ends (default 5 ms) so the loop seam
   doesn't click.
@@ -173,7 +197,7 @@ Drums should be the last thing to come back.
 
 ### 3. Percentage of the song: 0.1%, 1%, 10%, 50%
 
-    uv run fourier sweep song.mp3 --select top --counts 10584,105840,1058400,5292000
+    uv run fourier sweep song.mp3 --select top --counts 0.1%,1%,10%,50%
 
 The "how few knobs can I sell" question. Music spectra are heavy-tailed, so
 10% may already sound close, with a smeared top end (untested).
@@ -211,19 +235,13 @@ The cleanest A/B of low-pass versus smear.
 - **Volume:** output isn't normalised. Low N is quiet; turn it down before
   playing larger N.
 
+- **Phase:** add `--phase random` to sweep 3. A whole song with random
+  phases should collapse into an 8-minute wash of its average spectrum.
+
 - **Stereo:** try `--channel left` vs `right` on a song with hard-panned
   instruments.
 
 ## Ideas
-
-- **Percentages in `--counts`**, e.g. `--counts 0.1%,1%,10%`, so sweep 3
-  works on any clip length. Let the parser keep strings, and resolve them
-  once the coefficient count is known:
-
-  ```python
-  def resolve(spec: str, total: int) -> int:
-      return round(total * float(spec[:-1]) / 100) if spec.endswith("%") else int(spec)
-  ```
 
 - **GUI:** [Pyxel](https://github.com/kitao/pyxel) for a pixel-art
   spectrogram; a grid of knobs wired to live resynthesis; paint a

@@ -81,3 +81,27 @@ def test_top_n_keeps_exactly_n():
 def test_notes_start_with_silence():
     x = audio.test_notes(1.0, 8000)
     assert np.all(x[:2000] == 0) and np.max(np.abs(x)) > 0.1
+
+
+@pytest.mark.parametrize("n", [1000, 1001])
+@pytest.mark.parametrize("how", ["zero", "random"])
+def test_set_phase_keeps_magnitudes_and_energy(n, how):
+    x = np.random.default_rng(4).uniform(-1, 1, n)
+    coeffs = series.analyse(x)
+    changed = series.set_phase(coeffs, how, n, np.random.default_rng(0))
+    assert np.allclose(np.abs(changed), np.abs(coeffs))
+    y = series.resynth(changed, n)
+    assert np.mean(y**2) == pytest.approx(np.mean(x**2))
+    # Survives a round trip unchanged, i.e. it describes a real signal.
+    assert np.allclose(series.analyse(y), changed)
+
+
+def test_zero_phase_peaks_at_start():
+    x = np.random.default_rng(5).uniform(-1, 1, 1000)
+    y = series.resynth(series.set_phase(series.analyse(x), "zero", 1000), 1000)
+    assert np.argmax(y) == 0
+
+
+def test_top_n_zero_keeps_nothing():
+    coeffs = series.analyse(np.ones(100))
+    assert np.count_nonzero(series.top_n(coeffs, 0)) == 0

@@ -114,31 +114,39 @@ def cmd_sweep(args: argparse.Namespace) -> None:
         coeffs = series.analyse(x)
         prog.update(task, completed=1)
 
-        counts = sorted({min(c, len(coeffs)) for c in args.counts})
+        counts = sorted({min(_resolve_count(c, len(coeffs)), len(coeffs)) for c in args.counts})
         modes = ["first", "top"] if args.select == "both" else [args.select]
-        task = prog.add_task(
-            f"Resynthesising {len(modes) * len(counts)} steps", total=len(modes) * len(counts)
-        )
-        steps = []  # (mode, count, highest kept Hz, rebuilt signal)
-        for mode in modes:
+        combos = [(mode, phase) for mode in modes for phase in args.phase]
+        total = len(combos) * len(counts)
+        task = prog.add_task(f"Resynthesising {total} steps", total=total)
+        rng = np.random.default_rng(args.seed)
+        steps = []  # (mode, phase, count, highest kept Hz, rebuilt signal)
+        for mode, phase in combos:
             for count in counts:
                 kept = series.SELECTORS[mode](coeffs, count)
                 highest = np.flatnonzero(kept).max(initial=0) * sr / len(x)
-                steps.append((mode, count, highest, series.resynth(kept, len(x))))
+                kept = series.set_phase(kept, phase, len(x), rng)
+                steps.append((mode, phase, count, highest, series.resynth(kept, len(x))))
                 prog.advance(task)
 
     width = len(str(len(coeffs)))
     audio.write(str(out_dir / "original.wav"), x, sr)
-    for mode, count, _, y in steps:
-        audio.write(str(out_dir / f"{mode}-{count:0{width}d}.wav"), y, sr)
+    for mode, phase, count, _, y in steps:
+        audio.write(str(out_dir / f"{_label(mode, phase)}-{count:0{width}d}.wav"), _unclip(y), sr)
 
     # All steps back to back, then the original: the audio version of the llama animation.
     # Skipped for long clips, where it would run to hours.
     if len(x) <= PROGRESSION_MAX_SECONDS * sr:
         gap = np.zeros(int(sr * 0.5))
-        for mode in modes:
-            parts = [part for m, _, _, y in steps if m == mode for part in (y, gap)]
-            audio.write(str(out_dir / f"progression-{mode}.wav"), np.concatenate(parts + [x]), sr)
+        for mode, phase in combos:
+            parts = [
+                part for m, ph, _, _, y in steps if (m, ph) == (mode, phase) for part in (y, gap)
+            ]
+            audio.write(
+                str(out_dir / f"progression-{_label(mode, phase)}.wav"),
+                _unclip(np.concatenate(parts + [x])),
+                sr,
+            )
 
     console.print(
         f"\n{len(x):,} samples at {sr} Hz ({len(x) / sr:.2f}s) -> "
@@ -146,23 +154,42 @@ def cmd_sweep(args: argparse.Namespace) -> None:
     )
     table = Table(title="Rebuilding from N coefficients")
     table.add_column("select")
+    table.add_column("phase")
     table.add_column("N", justify="right")
-    table.add_column("knobs", justify="right")
+    table.add_column("% of coeffs", justify="right")
     table.add_column("highest Hz", justify="right")
     table.add_column("energy kept", justify="right")
+    table.add_column("peak", justify="right")
     table.add_column("SNR (dB)", justify="right")
     signal_power = np.mean(x**2)
-    for mode, count, highest, y in steps:
+    for mode, phase, count, highest, y in steps:
+        peak = np.max(np.abs(y))
         table.add_row(
             mode,
+            phase,
             f"{count:,}",
-            f"{2 * count:,}",
+            f"{count / len(coeffs):.2%}",
             f"{highest:,.1f}",
             f"{np.mean(y**2) / signal_power:.1%}",
+            f"[red]{peak:.2f}[/]" if peak > 1 else f"{peak:.2f}",
             f"{series.compare(x, y)['snr_db']:.1f}",
         )
     console.print(table)
+    console.print(f"Original peak {np.max(np.abs(x)):.2f}.")
+    if any(np.max(np.abs(y)) > 1 for *_, y in steps):
+        console.print("[red]Red[/] peaks would clip, so those WAVs were scaled down to peak 1.0.")
     console.print(f"WAVs written to [bold]{out_dir}/[/]")
+
+
+def _unclip(y: np.ndarray) -> np.ndarray:
+    """Scale down a signal that would clip on playback; leave others alone."""
+    peak = np.max(np.abs(y))
+    return y / peak if peak > 1 else y
+
+
+def _label(mode: str, phase: str) -> str:
+    """File-name stem: 'top', or 'top-random' when phases were changed."""
+    return mode if phase == "keep" else f"{mode}-{phase}"
 
 
 def _report(x, sr, coeffs, rebuilt, rows, out_dir: Path) -> None:
@@ -200,8 +227,35 @@ def _add_clip_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--sr", type=int, default=44100, help="sample rate for the test signal")
 
 
-def _int_list(text: str) -> list[int]:
-    return [int(part) for part in text.split(",")]
+def _count_list(text: str) -> list[str]:
+    """Comma-separated counts: whole numbers, or percentages like '0.1%'.
+
+    Percentages can't be turned into counts until the clip is analysed, so
+    they're kept as strings here and resolved by _resolve_count.
+    """
+    specs = text.split(",")
+    for spec in specs:
+        try:
+            _resolve_count(spec, 1)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a count or percentage: {spec!r}")
+    return specs
+
+
+def _resolve_count(spec: str, total: int) -> int:
+    if spec.endswith("%"):
+        return round(total * float(spec[:-1]) / 100)
+    return int(spec)
+
+
+def _phase_list(text: str) -> list[str]:
+    phases = text.split(",")
+    for phase in phases:
+        if phase not in series.PHASES:
+            raise argparse.ArgumentTypeError(
+                f"unknown phase {phase!r}; choose from {', '.join(series.PHASES)}"
+            )
+    return phases
 
 
 def main() -> None:
@@ -229,8 +283,12 @@ def main() -> None:
     _add_clip_args(p)
     p.add_argument("--select", choices=["first", "top", "both"], default="first",
                    help="first N coefficients (low-pass), the N largest, or both for comparison")
-    p.add_argument("--counts", type=_int_list, default=[1, 10, 100, 1000, 10000, 100000],
-                   help="comma-separated values of N (default: 1,10,100,1000,10000,100000)")
+    p.add_argument("--counts", type=_count_list, default=["1", "10", "100", "1000", "10000", "100000"],
+                   help="comma-separated values of N, as counts or percentages of all coefficients, "
+                        "e.g. 100,0.1%%,10%% (default: 1,10,100,1000,10000,100000)")
+    p.add_argument("--phase", type=_phase_list, default=["keep"],
+                   help="comma-separated phase treatments: keep, zero, random (default: keep)")
+    p.add_argument("--seed", type=int, default=0, help="random seed for --phase random")
     p.add_argument("--fade-ms", type=float, default=5.0,
                    help="fade the clip's ends so the loop seam doesn't click (0 to disable)")
     p.add_argument("--out-dir", default="out/sweep")

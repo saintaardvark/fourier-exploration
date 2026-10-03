@@ -51,6 +51,9 @@ def top_n(coeffs: np.ndarray, count: int) -> np.ndarray:
     """
     if count >= len(coeffs):
         return coeffs.copy()
+    if count <= 0:
+        # argpartition(..., -0) would select everything.
+        return np.zeros_like(coeffs)
     # argpartition finds the top `count` without a full sort: fast on long clips.
     keep = np.argpartition(np.abs(coeffs), -count)[-count:]
     kept = np.zeros_like(coeffs)
@@ -59,6 +62,35 @@ def top_n(coeffs: np.ndarray, count: int) -> np.ndarray:
 
 
 SELECTORS = {"first": first_n, "top": top_n}
+
+PHASES = ("keep", "zero", "random")
+
+
+def set_phase(
+    coeffs: np.ndarray, how: str, n: int, rng: np.random.Generator | None = None
+) -> np.ndarray:
+    """Replace each coefficient's phase, keeping its magnitude.
+
+    how: "keep" (unchanged), "zero" (every cosine peaks at t=0), or
+    "random" (uniform in [0, 2*pi)). Magnitudes are untouched, so the energy
+    and the spectrum are identical; only the timing changes.
+
+    DC, and Nyquist for even n, must stay real for the signal to be real,
+    so "random" leaves them as they are.
+    """
+    if how == "keep":
+        return coeffs.copy()
+    mags = np.abs(coeffs)
+    if how == "zero":
+        return mags.astype(coeffs.dtype)
+    if how == "random":
+        rng = rng or np.random.default_rng()
+        out = mags * np.exp(1j * rng.uniform(0, 2 * np.pi, len(coeffs)))
+        out[0] = coeffs[0]
+        if n % 2 == 0:
+            out[-1] = coeffs[-1]
+        return out
+    raise ValueError(f"unknown phase mode: {how}")
 
 
 def to_knobs(coeffs: np.ndarray, n: int, sr: int) -> Knobs:
