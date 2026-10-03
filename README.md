@@ -77,7 +77,7 @@ frames (STFT) → the core of a codec.
 | 2 | First-N sweep; hear the low-pass | `sweep --select first` |
 | 3 | Top-N sweep; hear smearing and pre-echo | `sweep --select top` |
 | 4 | Zero or randomise phases | `sweep --phase zero,random` |
-| 5 | Quantise to B bits per knob | |
+| 5 | Quantise to B bits per knob | `sweep --bits 16,8,4` |
 | 6 | STFT, top-N per frame; compare with step 3 | |
 | 7 | Stereo as an XY path; epicycle plot | |
 
@@ -123,6 +123,7 @@ Output: `out/roundtrip/`.
     uv run fourier sweep song.mp3 --seconds 5 --select both --counts 50,500,5000
     uv run fourier sweep song.mp3 --select top --counts 0.1%,1%,10%
     uv run fourier sweep --test notes --select top --phase keep,zero,random
+    uv run fourier sweep song.mp3 --seconds 5 --select top --counts 10% --bits float,8,6,4
 
 `--select` picks which N coefficients to keep:
 
@@ -152,12 +153,34 @@ magnitude alone. Comma-separate several to compare them:
 Same energy, same spectrum, very different sound: phase is where the
 timing lives.
 
-Writes `<select>[-<phase>]-<N>.wav` for each N, and (for clips up to 30 s)
-`progression-<select>[-<phase>].wav`: every step back to back, then the
-original.
+`--bits` rounds each knob (magnitude and phase) to B bits. Comma-separate
+several; `float` means unquantised. Phase gets 2^B angles around the
+circle. Magnitude gets 2^B levels, one of them zero, spaced by `--quant`:
 
-The table's `peak` column turns red above 1.0; those WAVs are scaled
-down to peak 1.0 so they don't clip.
+- `log` (default): even steps in dB over the top `--db-range` dB
+  (default 96). Closer to how loudness is heard.
+
+- `linear`: even steps from zero to the loudest coefficient. Quiet
+  coefficients mostly round to zero.
+
+At low bits, energy can come out *above* 100%. Rounding in dB is
+lopsided: rounding up by half a step adds more power than rounding down
+removes. At 2 bits the log step is 96 dB, so everything above -48 dB
+jumps to full volume.
+
+Writes `<version>-<N>.wav` for each N, where the version is the select
+mode plus any phase or bits change, e.g. `top-random-8bit`. For clips up
+to 30 s, `progression-<version>.wav` plays every step back to back, then
+the original.
+
+The table:
+
+- `peak` turns red above 1.0; those WAVs are scaled down to peak 1.0 so
+  they don't clip.
+
+- `kbps` is the bitrate of the knob settings: 2 × B bits per coefficient
+  (two 32-bit floats if unquantised), plus, for `top`, the bits needed to
+  say which bins were kept. Compare with ~128 kbps for a typical MP3.
 
 - `--fade-ms`: fade the clip's ends (default 5 ms) so the loop seam
   doesn't click.
@@ -242,6 +265,33 @@ The cleanest A/B of low-pass versus smear.
   instruments.
 
 ## Ideas
+
+- **Compression for the high-peaks case.** Zero phase piles most of the
+  energy into one click, and coarse log quantisation can push peaks well
+  above 1.0. Right now `_unclip` in `cli.py` scales the *whole* file
+  down, so everything else becomes very quiet. Dynamic range compression
+  only turns down the loud parts. Two options:
+
+  - **Soft clip:** `np.tanh(y)`. One line, no parameters. Leaves quiet
+    parts nearly untouched and rounds off peaks, with some distortion.
+
+  - **Limiter:** follow the signal's envelope, and reduce the gain only
+    while the envelope is above a threshold. Fast attack so the click
+    can't get through; slow release so the gain doesn't pump.
+
+    ```python
+    def limit(y, sr, threshold=0.9, release_ms=100):
+        env = np.empty_like(y)
+        decay = np.exp(-1 / (sr * release_ms / 1000))
+        level = 0.0
+        for i, v in enumerate(np.abs(y)):  # slow in pure Python; fine for a sketch
+            level = max(v, level * decay)   # instant attack, exponential release
+            env[i] = level
+        return y * np.minimum(1, threshold / np.maximum(env, 1e-12))
+    ```
+
+  Either is still a distortion of what the knobs describe, so keep
+  the plain scaling as an option for honest comparisons.
 
 - **GUI:** [Pyxel](https://github.com/kitao/pyxel) for a pixel-art
   spectrogram; a grid of knobs wired to live resynthesis; paint a

@@ -105,3 +105,26 @@ def test_zero_phase_peaks_at_start():
 def test_top_n_zero_keeps_nothing():
     coeffs = series.analyse(np.ones(100))
     assert np.count_nonzero(series.top_n(coeffs, 0)) == 0
+
+
+@pytest.mark.parametrize("scale", series.QUANT_SCALES)
+def test_quantise_uses_at_most_2_to_the_bits_levels(scale):
+    coeffs = series.analyse(np.random.default_rng(6).standard_normal(4000))
+    q = series.quantise(coeffs, 3, scale)
+    assert len(np.unique(np.round(np.abs(q), 9))) <= 8
+    assert len(np.unique(np.round(np.angle(q[np.abs(q) > 0]), 9))) <= 9  # -pi and pi coincide
+
+
+@pytest.mark.parametrize("scale", series.QUANT_SCALES)
+def test_quantise_error_shrinks_with_bits(scale):
+    x = np.random.default_rng(7).standard_normal(4000)
+    coeffs = series.analyse(x)
+    snrs = [series.compare(x, series.resynth(series.quantise(coeffs, b, scale), 4000))["snr_db"]
+            for b in (4, 8, 16)]
+    assert snrs[0] < snrs[1] < snrs[2]
+
+
+def test_quantise_keeps_zeros_zero():
+    coeffs = series.analyse(np.random.default_rng(8).standard_normal(1000))
+    kept = series.top_n(coeffs, 50)
+    assert np.count_nonzero(series.quantise(kept, 8, "log")) <= 50

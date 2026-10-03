@@ -1,7 +1,9 @@
 """Command-line entry point."""
 
 import argparse
+import math
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -102,6 +104,39 @@ def cmd_roundtrip(args: argparse.Namespace) -> None:
     _report(x, sr, coeffs, rebuilt, rows, out_dir)
 
 
+@dataclass
+class Step:
+    """One rebuilt version of the clip in a sweep."""
+
+    mode: str  # "first" or "top"
+    phase: str  # see series.PHASES
+    bits: int | None  # bits per knob; None means unquantised
+    count: int  # coefficients kept
+    highest_hz: float  # frequency of the highest coefficient kept
+    y: np.ndarray  # rebuilt signal
+
+    @property
+    def label(self) -> str:
+        """File-name stem, e.g. 'top', 'top-random', 'top-random-8bit'."""
+        parts = [self.mode]
+        if self.phase != "keep":
+            parts.append(self.phase)
+        if self.bits is not None:
+            parts.append(f"{self.bits}bit")
+        return "-".join(parts)
+
+    def kbps(self, total_coeffs: int, seconds: float) -> float:
+        """Bitrate of the knob settings.
+
+        Unquantised knobs are counted as two 32-bit floats. top-N must also
+        say which bins it kept; first-N doesn't, since they're always 0..N-1.
+        """
+        per_coeff = 64 if self.bits is None else 2 * self.bits
+        if self.mode == "top" and self.count < total_coeffs:
+            per_coeff += math.ceil(math.log2(total_coeffs))
+        return self.count * per_coeff / seconds / 1000
+
+
 def cmd_sweep(args: argparse.Namespace) -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -116,67 +151,69 @@ def cmd_sweep(args: argparse.Namespace) -> None:
 
         counts = sorted({min(_resolve_count(c, len(coeffs)), len(coeffs)) for c in args.counts})
         modes = ["first", "top"] if args.select == "both" else [args.select]
-        combos = [(mode, phase) for mode in modes for phase in args.phase]
+        combos = [
+            (mode, phase, bits) for mode in modes for phase in args.phase for bits in args.bits
+        ]
         total = len(combos) * len(counts)
         task = prog.add_task(f"Resynthesising {total} steps", total=total)
         rng = np.random.default_rng(args.seed)
-        steps = []  # (mode, phase, count, highest kept Hz, rebuilt signal)
-        for mode, phase in combos:
+        steps: list[Step] = []
+        for mode, phase, bits in combos:
             for count in counts:
                 kept = series.SELECTORS[mode](coeffs, count)
                 highest = np.flatnonzero(kept).max(initial=0) * sr / len(x)
                 kept = series.set_phase(kept, phase, len(x), rng)
-                steps.append((mode, phase, count, highest, series.resynth(kept, len(x))))
+                if bits is not None:
+                    kept = series.quantise(kept, bits, args.quant, args.db_range)
+                y = series.resynth(kept, len(x))
+                steps.append(Step(mode, phase, bits, count, highest, y))
                 prog.advance(task)
 
     width = len(str(len(coeffs)))
     audio.write(str(out_dir / "original.wav"), x, sr)
-    for mode, phase, count, _, y in steps:
-        audio.write(str(out_dir / f"{_label(mode, phase)}-{count:0{width}d}.wav"), _unclip(y), sr)
+    for step in steps:
+        audio.write(str(out_dir / f"{step.label}-{step.count:0{width}d}.wav"), _unclip(step.y), sr)
 
     # All steps back to back, then the original: the audio version of the llama animation.
     # Skipped for long clips, where it would run to hours.
     if len(x) <= PROGRESSION_MAX_SECONDS * sr:
         gap = np.zeros(int(sr * 0.5))
-        for mode, phase in combos:
-            parts = [
-                part for m, ph, _, _, y in steps if (m, ph) == (mode, phase) for part in (y, gap)
-            ]
+        for label in dict.fromkeys(step.label for step in steps):
+            parts = [part for step in steps if step.label == label for part in (step.y, gap)]
             audio.write(
-                str(out_dir / f"progression-{_label(mode, phase)}.wav"),
-                _unclip(np.concatenate(parts + [x])),
-                sr,
+                str(out_dir / f"progression-{label}.wav"), _unclip(np.concatenate(parts + [x])), sr
             )
 
+    seconds = len(x) / sr
     console.print(
-        f"\n{len(x):,} samples at {sr} Hz ({len(x) / sr:.2f}s) -> "
+        f"\n{len(x):,} samples at {sr} Hz ({seconds:.2f}s) -> "
         f"{len(coeffs):,} coefficients, bin spacing {sr / len(x):.3g} Hz"
     )
     table = Table(title="Rebuilding from N coefficients")
-    table.add_column("select")
-    table.add_column("phase")
+    table.add_column("version")
     table.add_column("N", justify="right")
-    table.add_column("% of coeffs", justify="right")
-    table.add_column("highest Hz", justify="right")
-    table.add_column("energy kept", justify="right")
+    table.add_column("% coeffs", justify="right")
+    table.add_column("top Hz", justify="right")
+    table.add_column("energy", justify="right")
     table.add_column("peak", justify="right")
-    table.add_column("SNR (dB)", justify="right")
+    table.add_column("SNR dB", justify="right")
+    table.add_column("kbps", justify="right")
     signal_power = np.mean(x**2)
-    for mode, phase, count, highest, y in steps:
-        peak = np.max(np.abs(y))
+    for step in steps:
+        peak = np.max(np.abs(step.y))
         table.add_row(
-            mode,
-            phase,
-            f"{count:,}",
-            f"{count / len(coeffs):.2%}",
-            f"{highest:,.1f}",
-            f"{np.mean(y**2) / signal_power:.1%}",
+            step.label,
+            f"{step.count:,}",
+            f"{step.count / len(coeffs):.1%}",
+            f"{step.highest_hz:,.0f}",
+            f"{np.mean(step.y**2) / signal_power:.0%}",
             f"[red]{peak:.2f}[/]" if peak > 1 else f"{peak:.2f}",
-            f"{series.compare(x, y)['snr_db']:.1f}",
+            f"{series.compare(x, step.y)['snr_db']:.1f}",
+            f"{step.kbps(len(coeffs), seconds):,.0f}",
         )
     console.print(table)
-    console.print(f"Original peak {np.max(np.abs(x)):.2f}.")
-    if any(np.max(np.abs(y)) > 1 for *_, y in steps):
+    console.print(f"Original peak {np.max(np.abs(x)):.2f}. For scale, a typical MP3 is 128 kbps.")
+    if any(np.max(np.abs(step.y)) > 1 for step in steps):
         console.print("[red]Red[/] peaks would clip, so those WAVs were scaled down to peak 1.0.")
     console.print(f"WAVs written to [bold]{out_dir}/[/]")
 
@@ -185,11 +222,6 @@ def _unclip(y: np.ndarray) -> np.ndarray:
     """Scale down a signal that would clip on playback; leave others alone."""
     peak = np.max(np.abs(y))
     return y / peak if peak > 1 else y
-
-
-def _label(mode: str, phase: str) -> str:
-    """File-name stem: 'top', or 'top-random' when phases were changed."""
-    return mode if phase == "keep" else f"{mode}-{phase}"
 
 
 def _report(x, sr, coeffs, rebuilt, rows, out_dir: Path) -> None:
@@ -248,6 +280,19 @@ def _resolve_count(spec: str, total: int) -> int:
     return int(spec)
 
 
+def _bits_list(text: str) -> list[int | None]:
+    """Comma-separated bits per knob; 'float' means unquantised."""
+    out: list[int | None] = []
+    for part in text.split(","):
+        if part == "float":
+            out.append(None)
+        elif part.isdigit() and int(part) >= 1:
+            out.append(int(part))
+        else:
+            raise argparse.ArgumentTypeError(f"bits must be a whole number >= 1 or 'float': {part!r}")
+    return out
+
+
 def _phase_list(text: str) -> list[str]:
     phases = text.split(",")
     for phase in phases:
@@ -289,6 +334,13 @@ def main() -> None:
     p.add_argument("--phase", type=_phase_list, default=["keep"],
                    help="comma-separated phase treatments: keep, zero, random (default: keep)")
     p.add_argument("--seed", type=int, default=0, help="random seed for --phase random")
+    p.add_argument("--bits", type=_bits_list, default=[None],
+                   help="comma-separated bits per knob (magnitude and phase each), "
+                        "or 'float' for unquantised, e.g. float,16,8,4 (default: float)")
+    p.add_argument("--quant", choices=series.QUANT_SCALES, default="log",
+                   help="magnitude quantisation: log (dB steps) or linear (default: log)")
+    p.add_argument("--db-range", type=float, default=96.0,
+                   help="dB below the loudest coefficient covered by log quantisation (default: 96)")
     p.add_argument("--fade-ms", type=float, default=5.0,
                    help="fade the clip's ends so the loop seam doesn't click (0 to disable)")
     p.add_argument("--out-dir", default="out/sweep")

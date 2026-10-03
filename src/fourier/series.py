@@ -93,6 +93,56 @@ def set_phase(
     raise ValueError(f"unknown phase mode: {how}")
 
 
+QUANT_SCALES = ("log", "linear")
+
+
+def quantise(
+    coeffs: np.ndarray, bits: int, scale: str = "log", db_range: float = 96.0
+) -> np.ndarray:
+    """Round each coefficient's magnitude and phase to `bits` bits apiece.
+
+    Phase gets 2**bits evenly spaced angles around the circle.
+
+    Magnitude gets 2**bits levels, one of which is zero:
+      - "linear": evenly spaced from 0 to the largest magnitude. Quiet
+        coefficients mostly round to zero.
+      - "log": evenly spaced in dB over the top `db_range` dB, which is
+        closer to how loudness is heard. Anything quieter becomes zero.
+
+    Zero coefficients (e.g. ones top_n dropped) stay zero.
+    """
+    if bits < 1:
+        raise ValueError("need at least 1 bit")
+    levels = 2**bits
+    mags = np.abs(coeffs)
+    peak = mags.max()
+    if peak == 0:
+        return coeffs.copy()
+
+    if scale == "linear":
+        step = peak / (levels - 1)
+        q_mags = np.round(mags / step) * step
+    elif scale == "log":
+        # Level 0 is silence; levels 1 .. levels-1 span [peak - db_range, peak] dB.
+        with np.errstate(divide="ignore"):
+            db = 20 * np.log10(mags / peak)
+        floor = -db_range
+        if levels == 2:
+            idx = (db >= floor / 2).astype(int)  # 1 bit: on (at peak) or off
+            q_db = np.zeros_like(db)
+        else:
+            step = db_range / (levels - 2)
+            idx = np.clip(np.round((db - floor) / step), -1, levels - 2) + 1
+            q_db = floor + (idx - 1) * step
+        q_mags = np.where(idx > 0, peak * 10 ** (q_db / 20), 0.0)
+    else:
+        raise ValueError(f"unknown scale: {scale}")
+
+    step = 2 * np.pi / levels
+    q_phase = np.round(np.angle(coeffs) / step) * step
+    return q_mags * np.exp(1j * q_phase)
+
+
 def to_knobs(coeffs: np.ndarray, n: int, sr: int) -> Knobs:
     """Convert rfft output into amplitude/phase pairs for the cosine form.
 
