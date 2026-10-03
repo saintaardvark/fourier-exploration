@@ -43,6 +43,24 @@ def first_n(coeffs: np.ndarray, count: int) -> np.ndarray:
     return kept
 
 
+def top_n(coeffs: np.ndarray, count: int) -> np.ndarray:
+    """Keep the `count` largest coefficients by magnitude; zero the rest.
+
+    (Strictly, DC and Nyquist count half as much as other bins -- see
+    to_knobs -- but that's two bins out of thousands, so it's ignored.)
+    """
+    if count >= len(coeffs):
+        return coeffs.copy()
+    # argpartition finds the top `count` without a full sort: fast on long clips.
+    keep = np.argpartition(np.abs(coeffs), -count)[-count:]
+    kept = np.zeros_like(coeffs)
+    kept[keep] = coeffs[keep]
+    return kept
+
+
+SELECTORS = {"first": first_n, "top": top_n}
+
+
 def to_knobs(coeffs: np.ndarray, n: int, sr: int) -> Knobs:
     """Convert rfft output into amplitude/phase pairs for the cosine form.
 

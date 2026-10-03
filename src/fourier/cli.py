@@ -54,9 +54,9 @@ def _load_clip(args: argparse.Namespace, prog: Progress) -> tuple[np.ndarray, in
             progress=lambda done, total: prog.update(task, completed=done, total=total),
         )
     else:
-        task = prog.add_task("Generating test tone", total=1)
+        task = prog.add_task(f"Generating test {args.test}", total=1)
         sr = args.sr
-        x = audio.test_tone(args.seconds or 1.0, sr)
+        x = audio.TEST_SIGNALS[args.test](args.seconds or 1.0, sr)
         prog.update(task, completed=1)
     return x, sr
 
@@ -115,40 +115,49 @@ def cmd_sweep(args: argparse.Namespace) -> None:
         prog.update(task, completed=1)
 
         counts = sorted({min(c, len(coeffs)) for c in args.counts})
-        task = prog.add_task(f"Resynthesising {len(counts)} steps", total=len(counts))
-        steps = []  # (count, rebuilt signal)
-        for count in counts:
-            steps.append((count, series.resynth(series.first_n(coeffs, count), len(x))))
-            prog.advance(task)
+        modes = ["first", "top"] if args.select == "both" else [args.select]
+        task = prog.add_task(
+            f"Resynthesising {len(modes) * len(counts)} steps", total=len(modes) * len(counts)
+        )
+        steps = []  # (mode, count, highest kept Hz, rebuilt signal)
+        for mode in modes:
+            for count in counts:
+                kept = series.SELECTORS[mode](coeffs, count)
+                highest = np.flatnonzero(kept).max(initial=0) * sr / len(x)
+                steps.append((mode, count, highest, series.resynth(kept, len(x))))
+                prog.advance(task)
 
     width = len(str(len(coeffs)))
     audio.write(str(out_dir / "original.wav"), x, sr)
-    for count, y in steps:
-        audio.write(str(out_dir / f"first-{count:0{width}d}.wav"), y, sr)
+    for mode, count, _, y in steps:
+        audio.write(str(out_dir / f"{mode}-{count:0{width}d}.wav"), y, sr)
 
     # All steps back to back, then the original: the audio version of the llama animation.
     # Skipped for long clips, where it would run to hours.
     if len(x) <= PROGRESSION_MAX_SECONDS * sr:
         gap = np.zeros(int(sr * 0.5))
-        progression = np.concatenate([part for _, y in steps for part in (y, gap)] + [x])
-        audio.write(str(out_dir / "progression.wav"), progression, sr)
+        for mode in modes:
+            parts = [part for m, _, _, y in steps if m == mode for part in (y, gap)]
+            audio.write(str(out_dir / f"progression-{mode}.wav"), np.concatenate(parts + [x]), sr)
 
     console.print(
         f"\n{len(x):,} samples at {sr} Hz ({len(x) / sr:.2f}s) -> "
         f"{len(coeffs):,} coefficients, bin spacing {sr / len(x):.3g} Hz"
     )
-    table = Table(title="First-N coefficients")
+    table = Table(title="Rebuilding from N coefficients")
+    table.add_column("select")
     table.add_column("N", justify="right")
     table.add_column("knobs", justify="right")
-    table.add_column("up to (Hz)", justify="right")
+    table.add_column("highest Hz", justify="right")
     table.add_column("energy kept", justify="right")
     table.add_column("SNR (dB)", justify="right")
     signal_power = np.mean(x**2)
-    for count, y in steps:
+    for mode, count, highest, y in steps:
         table.add_row(
+            mode,
             f"{count:,}",
             f"{2 * count:,}",
-            f"{(count - 1) * sr / len(x):,.1f}",
+            f"{highest:,.1f}",
             f"{np.mean(y**2) / signal_power:.1%}",
             f"{series.compare(x, y)['snr_db']:.1f}",
         )
@@ -183,10 +192,12 @@ def _report(x, sr, coeffs, rebuilt, rows, out_dir: Path) -> None:
 
 def _add_clip_args(p: argparse.ArgumentParser) -> None:
     """Arguments shared by every subcommand that works on a clip."""
-    p.add_argument("input", nargs="?", help="audio file (MP3/OGG/WAV/FLAC); omit for the test tone")
-    p.add_argument("--seconds", type=float, help="clip length from the start (default: whole file, or 1s of tone)")
+    p.add_argument("input", nargs="?", help="audio file (MP3/OGG/WAV/FLAC); omit for a test signal")
+    p.add_argument("--seconds", type=float, help="clip length from the start (default: whole file, or 1s of test signal)")
     p.add_argument("--channel", choices=["mix", "left", "right"], default="mix")
-    p.add_argument("--sr", type=int, default=44100, help="sample rate for the test tone")
+    p.add_argument("--test", choices=list(audio.TEST_SIGNALS), default="tone",
+                   help="test signal to use when no file is given: steady tone, or plucked notes after silence")
+    p.add_argument("--sr", type=int, default=44100, help="sample rate for the test signal")
 
 
 def _int_list(text: str) -> list[int]:
@@ -213,9 +224,11 @@ def main() -> None:
     p.set_defaults(func=cmd_roundtrip)
 
     p = sub.add_parser(
-        "sweep", help="rebuild a clip from its first N coefficients, for several N"
+        "sweep", help="rebuild a clip from N of its coefficients, for several N"
     )
     _add_clip_args(p)
+    p.add_argument("--select", choices=["first", "top", "both"], default="first",
+                   help="first N coefficients (low-pass), the N largest, or both for comparison")
     p.add_argument("--counts", type=_int_list, default=[1, 10, 100, 1000, 10000, 100000],
                    help="comma-separated values of N (default: 1,10,100,1000,10000,100000)")
     p.add_argument("--fade-ms", type=float, default=5.0,

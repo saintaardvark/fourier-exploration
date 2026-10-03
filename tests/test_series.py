@@ -61,3 +61,23 @@ def test_fade_ends_at_zero_and_leaves_middle():
     y = audio.fade(x, sr=1000, ms=10)
     assert y[0] == 0 and y[-1] == 0
     assert np.all(y[10:-10] == 1)
+
+
+def test_top_n_finds_the_loud_partials():
+    sr = 8000
+    t = np.arange(sr) / sr
+    loud = np.sin(2 * np.pi * 3000 * t) + 0.5 * np.sin(2 * np.pi * 50 * t)
+    quiet = 0.01 * np.sin(2 * np.pi * 700 * t)
+    coeffs = series.analyse(loud + quiet)
+    y = series.resynth(series.top_n(coeffs, 2), sr)
+    assert np.max(np.abs(y - loud)) < 1e-9
+
+
+def test_top_n_keeps_exactly_n():
+    coeffs = series.analyse(np.random.default_rng(3).uniform(-1, 1, 1000))
+    assert np.count_nonzero(series.top_n(coeffs, 37)) == 37
+
+
+def test_notes_start_with_silence():
+    x = audio.test_notes(1.0, 8000)
+    assert np.all(x[:2000] == 0) and np.max(np.abs(x)) > 0.1

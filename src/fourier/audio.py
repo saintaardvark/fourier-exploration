@@ -65,6 +65,25 @@ def test_tone(seconds: float = 1.0, sr: int = 44100) -> np.ndarray:
     return sine + square
 
 
+def test_notes(seconds: float = 1.0, sr: int = 44100) -> np.ndarray:
+    """Three plucked notes (A, C#, E) after a quarter-second of silence.
+
+    Sharp onsets and silent gaps are what a global Fourier series handles
+    worst: dropping coefficients smears energy into the silence (pre-echo).
+    """
+    n = int(seconds * sr)
+    out = np.zeros(n)
+    for start, freq in [(0.25, 440.0), (0.5, 554.37), (0.75, 659.26)]:
+        t = np.arange(n - int(start * sr)) / sr
+        envelope = np.exp(-t / 0.15)
+        harmonics = sum(np.sin(2 * np.pi * h * freq * t) / h for h in range(1, 7))
+        out[int(start * sr):] += 0.2 * envelope * harmonics
+    return out
+
+
+TEST_SIGNALS = {"tone": test_tone, "notes": test_notes}
+
+
 def fade(x: np.ndarray, sr: int, ms: float) -> np.ndarray:
     """Raised-cosine fade in and out, so the clip's end meets its start.
 
