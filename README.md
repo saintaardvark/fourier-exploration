@@ -85,6 +85,30 @@ Step 7 is the direct llama analogue: treat each sample as `L + iR`, take
 the complex Fourier series of that path, and draw it with epicycles. That's
 how oscilloscope music works.
 
+## Web demo
+
+https://saintaardvark.github.io/fourier-exploration/
+
+The plucked-notes clip, rebuilt live in your browser as you move the
+controls: first/largest N, phases, bits per knob, with waveform and
+spectrum plots. The maths is the same Python as the CLI
+(`series.py`, `signals.py`, `session.py`), run by
+[Pyodide](https://pyodide.org) in a Web Worker.
+
+- `web/`: the page (`index.html`, `app.js`, `worker.mjs`)
+- `tools/build_site.py`: copies `web/` and the Python modules into `_site/`
+- `.github/workflows/pages.yml`: tests, builds and publishes on every push
+  to `main`
+
+To run it locally:
+
+    uv run python tools/build_site.py
+    python -m http.server -d _site 8000    # then open http://localhost:8000/
+
+The Python modules the page loads must need only numpy: Pyodide has no
+`soundfile`, which is why the test signals live in `signals.py` rather
+than `audio.py`.
+
 ## Setup
 
     uv sync

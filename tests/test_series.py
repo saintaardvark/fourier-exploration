@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from fourier import audio, series
+from fourier import audio, series, signals
 
 
 @pytest.mark.parametrize("n", [1000, 1001])  # even n has a Nyquist bin, odd n doesn't
@@ -58,7 +58,7 @@ def test_first_n_all_is_exact():
 
 def test_fade_ends_at_zero_and_leaves_middle():
     x = np.ones(1000)
-    y = audio.fade(x, sr=1000, ms=10)
+    y = signals.fade(x, sr=1000, ms=10)
     assert y[0] == 0 and y[-1] == 0
     assert np.all(y[10:-10] == 1)
 
@@ -79,7 +79,7 @@ def test_top_n_keeps_exactly_n():
 
 
 def test_notes_start_with_silence():
-    x = audio.test_notes(1.0, 8000)
+    x = signals.test_notes(1.0, 8000)
     assert np.all(x[:2000] == 0) and np.max(np.abs(x)) > 0.1
 
 

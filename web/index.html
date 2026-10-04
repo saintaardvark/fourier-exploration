@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fourier Knobs</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M2 16c3-12 6-12 9 0s6 12 9 0 6-12 9 0' fill='none' stroke='%232a78d6' stroke-width='3'/%3E%3C/svg%3E">
+<meta name="description" content="Rebuild sound from its Fourier series coefficients, and hear what happens when you keep only some of them.">
+<style>
+  :root {
+    --bg: #fcfcfb;
+    --surface: #f4f3f0;
+    --border: #dddcd7;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --accent: #2a78d6;
+    --series-1: #2a78d6; /* original */
+    --series-2: #eb6834; /* rebuilt */
+    --grid: #e6e5e1;
+    --warn: #b3261e;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1a1a19;
+      --surface: #242423;
+      --border: #3a3a38;
+      --text: #ffffff;
+      --text-2: #c3c2b7;
+      --accent: #3987e5;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --grid: #2f2f2d;
+      --warn: #f2867e;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1a1a19;
+    --surface: #242423;
+    --border: #3a3a38;
+    --text: #ffffff;
+    --text-2: #c3c2b7;
+    --accent: #3987e5;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --grid: #2f2f2d;
+    --warn: #f2867e;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.9rem; margin: 0 0 4px; }
+  h2 { font-size: 1.25rem; margin: 40px 0 8px; }
+  p { margin: 0 0 12px; }
+  .lede { color: var(--text-2); font-size: 1.05rem; }
+  a { color: var(--accent); }
+  code { font-size: 0.92em; }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 16px 0;
+  }
+  #status { color: var(--text-2); font-size: 0.95rem; min-height: 1.5em; }
+  #status.error { color: var(--warn); }
+
+  .controls { display: grid; gap: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+  .row > label:first-child, .row > .label { min-width: 96px; color: var(--text-2); font-size: 0.95rem; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label { padding: 6px 12px; cursor: pointer; font-size: 0.95rem; }
+  .seg label:not(:first-of-type) { border-left: 1px solid var(--border); }
+  .seg input:checked + label { background: var(--accent); color: #fff; }
+  .seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
+  input[type="range"] { flex: 1; min-width: 180px; accent-color: var(--accent); }
+  select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  .readout { font-variant-numeric: tabular-nums; min-width: 9ch; }
+
+  button {
+    font: inherit;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .stat .k { color: var(--text-2); font-size: 0.8rem; }
+  .stat .v { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+  #clipnote { color: var(--warn); font-size: 0.9rem; min-height: 1.3em; margin-top: 6px; }
+
+  .chart { position: relative; margin-top: 12px; }
+  .chart h3 { font-size: 0.95rem; font-weight: 600; margin: 0 0 2px; }
+  .chart .legend { color: var(--text-2); font-size: 0.85rem; margin-bottom: 4px; }
+  .chart .legend span { margin-right: 14px; }
+  canvas { display: block; width: 100%; height: 160px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+  .tip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    display: none;
+  }
+
+  .presets { display: flex; flex-wrap: wrap; gap: 8px; }
+  .presets button { font-size: 0.9rem; padding: 6px 10px; }
+  dl { margin: 0; }
+  dt { font-weight: 600; margin-top: 12px; }
+  dd { margin: 2px 0 0; color: var(--text-2); }
+  footer { margin-top: 48px; color: var(--text-2); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Fourier Knobs</h1>
+  <p class="lede">
+    Any sound clip can be rebuilt exactly from a list of sine waves, each with
+    its own loudness and starting point: two knobs per wave. What happens if you
+    keep only some of the knobs?
+  </p>
+  <p>
+    The idea comes from <a href="https://adekau.github.io/posts/2020/llamas.html">a llama</a>
+    redrawn from more and more Fourier coefficients. Sound turns out to behave
+    rather differently.
+  </p>
+
+  <div class="panel" aria-live="polite">
+    <div id="status">Loading Python in your browser (about 15 MB the first time; cached after)…</div>
+
+    <div class="controls" id="controls" hidden>
+      <div class="row">
+        <span class="label">Clip</span>
+        <span>Three plucked notes (A, C♯, E) after a quarter-second of silence: 1 s, 44.1 kHz.</span>
+      </div>
+
+      <div class="row">
+        <span class="label" id="select-label">Keep</span>
+        <div class="seg" role="radiogroup" aria-labelledby="select-label">
+          <input type="radio" name="mode" id="mode-top" value="top" checked><label for="mode-top">Largest N</label>
+          <input type="radio" name="mode" id="mode-first" value="first"><label for="mode-first">First N</label>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="count">N</label>
+        <input type="range" id="count" min="0" max="1000" value="466">
+        <span class="readout" id="count-readout"></span>
+      </div>
+
+      <div class="row">
+        <span class="label" id="phase-label">Phases</span>
+        <div class="seg" role="radiogroup" aria-labelledby="phase-label">
+          <input type="radio" name="phase" id="phase-keep" value="keep" checked><label for="phase-keep">Keep</label>
+          <input type="radio" name="phase" id="phase-zero" value="zero"><label for="phase-zero">Zero</label>
+          <input type="radio" name="phase" id="phase-random" value="random"><label for="phase-random">Random</label>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="bits">Bits per knob</label>
+        <select id="bits">
+          <option value="">Unquantised</option>
+          <option>16</option>
+          <option>8</option>
+          <option>6</option>
+          <option>4</option>
+          <option>3</option>
+          <option>2</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <button class="primary" id="play-rebuilt"><span class="swatch" style="background: var(--series-2)"></span>Play rebuilt</button>
+        <button id="play-original"><span class="swatch" style="background: var(--series-1)"></span>Play original</button>
+        <button id="stop">Stop</button>
+      </div>
+
+      <div class="stats" id="stats"></div>
+      <div id="clipnote"></div>
+
+      <div class="chart">
+        <h3>Waveform</h3>
+        <div class="legend">
+          <span><i class="swatch" style="background: var(--series-1)"></i>Original</span>
+          <span><i class="swatch" style="background: var(--series-2)"></i>Rebuilt</span>
+        </div>
+        <canvas id="wave" aria-label="Waveform of the original and rebuilt clip"></canvas>
+        <div class="tip" id="wave-tip"></div>
+      </div>
+
+      <div class="chart">
+        <h3>Spectrum: loudest coefficient per band</h3>
+        <div class="legend">
+          <span><i class="swatch" style="background: var(--series-1)"></i>All coefficients</span>
+          <span><i class="swatch" style="background: var(--series-2)"></i>Kept</span>
+        </div>
+        <canvas id="spectrum" aria-label="Spectrum of all coefficients and the kept ones"></canvas>
+        <div class="tip" id="spectrum-tip"></div>
+      </div>
+    </div>
+  </div>
+
+  <h2>Try this</h2>
+  <div class="presets" id="presets">
+    <button data-mode="first" data-n="100" data-phase="keep" data-bits="">Low-pass: first 100</button>
+    <button data-mode="first" data-n="1000" data-phase="keep" data-bits="">First 1,000</button>
+    <button data-mode="top" data-n="10" data-phase="keep" data-bits="">Llama mode: largest 10</button>
+    <button data-mode="top" data-n="100" data-phase="keep" data-bits="">Largest 100</button>
+    <button data-mode="top" data-n="22051" data-phase="zero" data-bits="">Zero phase</button>
+    <button data-mode="top" data-n="22051" data-phase="random" data-bits="">Random phase</button>
+    <button data-mode="top" data-n="2205" data-phase="keep" data-bits="8">10% at 8 bits</button>
+    <button data-mode="top" data-n="2205" data-phase="keep" data-bits="2">10% at 2 bits</button>
+  </div>
+
+  <h2>What's going on</h2>
+  <dl>
+    <dt>Coefficients are sine waves</dt>
+    <dd>
+      A clip of length T is treated as one loop of a repeating signal.
+      Coefficient k is a sine wave at k / T Hz lasting the whole clip. This clip
+      is 1 s long, so the coefficients sit 1 Hz apart: 22,051 of them, or 44,102
+      knobs.
+    </dd>
+
+    <dt>First N is a low-pass filter</dt>
+    <dd>
+      Keeping coefficients 0 to N−1 keeps everything below N Hz and nothing
+      above. The notes start at 440 Hz, so "First 100" is silence. Bass comes
+      back first; brightness last.
+    </dd>
+
+    <dt>Largest N is the llama</dt>
+    <dd>
+      Keep the loudest coefficients instead, and the notes come back quickly.
+      But every coefficient lasts the whole clip, so dropping the rest stops
+      them cancelling out where there should be silence. You hear the notes
+      before they're played: <em>pre-echo</em>. Watch the orange waveform fill
+      the first quarter-second.
+    </dd>
+
+    <dt>Phase is where the timing lives</dt>
+    <dd>
+      Zero and Random keep every coefficient's loudness and change only where
+      each wave starts. The spectrum doesn't move, the energy doesn't change,
+      and the sound is ruined. Zero phase lines every wave up at the start of
+      the loop: one big click, and the clip becomes a palindrome. Random phase
+      spreads the notes into an even wash with no attacks.
+    </dd>
+
+    <dt>Bits per knob</dt>
+    <dd>
+      Each knob is rounded to 2<sup>B</sup> settings: loudness in even dB steps,
+      phase in even angles. 8 bits is close to perfect; at 2 bits the rounding is
+      so coarse that quiet waves jump to full volume. The kbps figure is what
+      the knob settings would cost to send; a typical MP3 is 128 kbps.
+    </dd>
+
+    <dt>Why MP3 doesn't do it this way</dt>
+    <dd>
+      Real codecs chop the sound into ~20 ms frames and do this per frame, so a
+      coefficient only has to describe a moment, not the whole song. That
+      fixes the smearing you hear here.
+    </dd>
+  </dl>
+
+  <footer>
+    The maths runs in your browser: Python and numpy via
+    <a href="https://pyodide.org">Pyodide</a>, using the same code as the
+    command-line tool in <a href="https://github.com/saintaardvark/fourier-exploration">the repository</a>.
+  </footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

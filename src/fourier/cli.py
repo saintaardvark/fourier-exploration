@@ -1,7 +1,6 @@
 """Command-line entry point."""
 
 import argparse
-import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +18,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from fourier import audio, series
+from fourier import audio, series, session, signals
 
 console = Console()
 
@@ -40,7 +39,7 @@ def _progress() -> Progress:
 
 
 def cmd_tone(args: argparse.Namespace) -> None:
-    x = audio.test_tone(args.seconds, args.sr)
+    x = signals.test_tone(args.seconds, args.sr)
     audio.write(args.out, x, args.sr)
     console.print(f"Wrote {args.seconds}s test tone to [bold]{args.out}[/]")
 
@@ -58,7 +57,7 @@ def _load_clip(args: argparse.Namespace, prog: Progress) -> tuple[np.ndarray, in
     else:
         task = prog.add_task(f"Generating test {args.test}", total=1)
         sr = args.sr
-        x = audio.TEST_SIGNALS[args.test](args.seconds or 1.0, sr)
+        x = signals.TEST_SIGNALS[args.test](args.seconds or 1.0, sr)
         prog.update(task, completed=1)
     return x, sr
 
@@ -126,15 +125,7 @@ class Step:
         return "-".join(parts)
 
     def kbps(self, total_coeffs: int, seconds: float) -> float:
-        """Bitrate of the knob settings.
-
-        Unquantised knobs are counted as two 32-bit floats. top-N must also
-        say which bins it kept; first-N doesn't, since they're always 0..N-1.
-        """
-        per_coeff = 64 if self.bits is None else 2 * self.bits
-        if self.mode == "top" and self.count < total_coeffs:
-            per_coeff += math.ceil(math.log2(total_coeffs))
-        return self.count * per_coeff / seconds / 1000
+        return session.knob_kbps(self.mode, self.count, self.bits, total_coeffs, seconds)
 
 
 def cmd_sweep(args: argparse.Namespace) -> None:
@@ -143,7 +134,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
 
     with _progress() as prog:
         x, sr = _load_clip(args, prog)
-        x = audio.fade(x, sr, args.fade_ms)
+        x = signals.fade(x, sr, args.fade_ms)
 
         task = prog.add_task("Analysing (FFT)", total=1)
         coeffs = series.analyse(x)
@@ -254,7 +245,7 @@ def _add_clip_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("input", nargs="?", help="audio file (MP3/OGG/WAV/FLAC); omit for a test signal")
     p.add_argument("--seconds", type=float, help="clip length from the start (default: whole file, or 1s of test signal)")
     p.add_argument("--channel", choices=["mix", "left", "right"], default="mix")
-    p.add_argument("--test", choices=list(audio.TEST_SIGNALS), default="tone",
+    p.add_argument("--test", choices=list(signals.TEST_SIGNALS), default="tone",
                    help="test signal to use when no file is given: steady tone, or plucked notes after silence")
     p.add_argument("--sr", type=int, default=44100, help="sample rate for the test signal")
 
