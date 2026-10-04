@@ -9,7 +9,20 @@ const workerUrl = new URL("worker.mjs", location.href);
 if (params.get("pyodide")) workerUrl.searchParams.set("pyodide", params.get("pyodide"));
 const worker = new Worker(workerUrl, { type: "module" });
 
+const SR = 44100; // decode everything at the CLI's rate
+const MAX_SECONDS = 30; // longest clip analysed at once
+const DEFAULT_SECONDS = 5;
+const MAX_FILE_MB = 150;
+const SONG = { url: "audio/switch-me-on.mp3", name: "\u201cSwitch Me On\u201d by Shane Ivers", mb: 10.7 };
+
 const state = {
+  clipId: 0, // bumped for every clip sent to the worker
+  loaded: false, // a clip has been analysed at least once
+  source: "notes", // "notes" | "song" | "file"
+  // The decoded song or file in use: {name, samples (mono Float32Array), sr,
+  // duration, start, length}, where start/length (seconds) is the selection.
+  audio: null,
+  decoded: { song: null, file: null }, // cached, so switching back is instant
   total: 0,
   sr: 44100,
   original: null, // Float32Array
@@ -63,16 +76,32 @@ worker.onmessage = ({ data }) => {
     setStatus(`Something went wrong: ${data.text}`, true);
     state.busy = false;
   } else if (data.type === "ready") {
+    if (data.clipId !== state.clipId) return; // superseded by a newer clip
+    if (playing) stop();
     state.total = data.total;
     state.sr = data.sr;
     state.original = data.original;
     setStatus("");
     $("controls").hidden = false;
     for (const btn of document.querySelectorAll("#presets button")) btn.disabled = false;
-    state.countOverride = 100; // start somewhere telling: the 100 largest
-    $("count").value = countToSlider(state.countOverride);
+    if (!state.loaded) {
+      state.countOverride = 100; // start somewhere telling: the 100 largest
+      state.loaded = true;
+    }
+    // Otherwise keep the slider's position; a preset's exact N may now be too big.
+    if (state.countOverride !== null) state.countOverride = Math.min(state.countOverride, state.total);
+    if (state.countOverride !== null) $("count").value = countToSlider(state.countOverride);
     requestRender();
   } else if (data.type === "rendered") {
+    if (data.clipId !== state.clipId) {
+      // A render of a clip that's since been replaced: drop it.
+      state.busy = false;
+      if (state.pending) {
+        state.pending = false;
+        requestRender();
+      }
+      return;
+    }
     state.rebuilt = data.y;
     state.stats = data.stats;
     const b = (data.spectrum.length - 1) / 3;
@@ -112,7 +141,7 @@ function showStats() {
     ["Highest kept", `${Math.round(s.highest_hz).toLocaleString()} Hz`],
     ["Energy", `${Math.round(100 * s.energy)}%`],
     ["SNR", s.snr_db === null ? "exact" : `${s.snr_db.toFixed(1)} dB`],
-    ["Bitrate", `${Math.round(s.kbps).toLocaleString()} kbps`],
+    ["Bitrate", `${s.kbps < 10 ? s.kbps.toFixed(1) : Math.round(s.kbps).toLocaleString()} kbps`],
   ];
   $("stats").innerHTML = tiles
     .map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`)
@@ -126,18 +155,22 @@ function showStats() {
 // --- Playback ----------------------------------------------------------------
 
 let audioCtx = null;
+// One context for decoding and playback. Fixing its rate at 44.1 kHz makes
+// decodeAudioData resample every file to the rate the CLI uses.
+const getAudioCtx = () => (audioCtx ??= new AudioContext({ sampleRate: SR }));
 let source = null;
 let playing = null; // "original" | "rebuilt" | null
 
 function play(which) {
-  audioCtx ??= new AudioContext();
+  const ctx = getAudioCtx();
+  ctx.resume();
   stop();
   const samples = which === "original" ? state.original : state.rebuilt;
-  const buffer = audioCtx.createBuffer(1, samples.length, state.sr);
+  const buffer = ctx.createBuffer(1, samples.length, state.sr);
   buffer.copyToChannel(samples, 0);
-  source = audioCtx.createBufferSource();
+  source = ctx.createBufferSource();
   source.buffer = buffer;
-  source.connect(audioCtx.destination);
+  source.connect(ctx.destination);
   source.onended = () => {
     if (source?.buffer === buffer) playing = null;
   };
@@ -327,7 +360,247 @@ for (const id of ["wave", "spectrum"]) {
   $(id).addEventListener("pointerleave", () => ($(`${id}-tip`).style.display = "none"));
 }
 
+// --- Sources -----------------------------------------------------------------
+
+function loadNotes() {
+  state.audio = null;
+  $("timespan").hidden = true;
+  $("clip-desc").textContent =
+    "Three plucked notes (A, C\u266f, E) after a quarter-second of silence: 1 s, 44.1 kHz.";
+  worker.postMessage({ type: "load-test", clipId: ++state.clipId, name: "notes" });
+}
+
+async function loadSong() {
+  try {
+    setStatus(`Downloading the song (${SONG.mb} MB)…`);
+    const res = await fetch(SONG.url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await useAudio(await res.arrayBuffer(), SONG.name, "song");
+  } catch (err) {
+    setStatus(`Couldn't load the song: ${err.message}`, true);
+  }
+}
+
+async function loadFile(file) {
+  if (!file) return;
+  if (file.size > MAX_FILE_MB * 1e6) {
+    setStatus(`That file is ${(file.size / 1e6).toFixed(0)} MB; the limit is ${MAX_FILE_MB} MB.`, true);
+    return;
+  }
+  try {
+    await useAudio(await file.arrayBuffer(), file.name, "file");
+  } catch (err) {
+    setStatus(
+      `Couldn't decode ${file.name} in this browser (${err.message || err}). ` +
+        "MP3 and WAV work everywhere; Ogg may not work in Safari.",
+      true,
+    );
+  }
+}
+
+// Decode, mix to mono, select the first few seconds and analyse them.
+async function useAudio(arrayBuffer, name, source) {
+  setStatus(`Decoding ${name}…`);
+  const decoded = await getAudioCtx().decodeAudioData(arrayBuffer);
+  const mono = new Float32Array(decoded.length);
+  for (let ch = 0; ch < decoded.numberOfChannels; ch++) {
+    const data = decoded.getChannelData(ch);
+    for (let i = 0; i < mono.length; i++) mono[i] += data[i] / decoded.numberOfChannels;
+  }
+  state.decoded[source] = {
+    name,
+    samples: mono,
+    sr: decoded.sampleRate,
+    duration: decoded.duration,
+    start: 0,
+    length: Math.min(DEFAULT_SECONDS, decoded.duration),
+  };
+  setStatus("");
+  // The visitor may have switched source while this was downloading/decoding.
+  if (state.source === source) showAudio(state.decoded[source]);
+}
+
+function showAudio(audio) {
+  state.audio = audio;
+  overviewCache = null;
+  $("timespan").hidden = false;
+  $("start").max = audio.duration.toFixed(1);
+  $("length").max = Math.min(MAX_SECONDS, audio.duration).toFixed(1);
+  syncSelection();
+  sendSelection();
+}
+
+function sendSelection() {
+  const { samples, sr } = state.audio;
+  const from = Math.round(state.audio.start * sr);
+  const to = Math.min(samples.length, from + Math.round(state.audio.length * sr));
+  const clip = samples.slice(from, to); // a copy, so it can be transferred
+  worker.postMessage({ type: "load-samples", clipId: ++state.clipId, samples: clip, sr }, [clip.buffer]);
+}
+
+let selectionTimer = null;
+const sendSelectionSoon = () => {
+  clearTimeout(selectionTimer);
+  selectionTimer = setTimeout(sendSelection, 250);
+};
+
+const fmtTime = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
+
+// Clamp the selection, then update the inputs, description and overview.
+function syncSelection() {
+  const { duration, name } = state.audio;
+  state.audio.length = Math.min(Math.max(state.audio.length, 0.1), MAX_SECONDS, duration);
+  state.audio.start = Math.min(Math.max(state.audio.start, 0), duration - state.audio.length);
+  $("start").value = state.audio.start.toFixed(1);
+  $("length").value = state.audio.length.toFixed(1);
+  $("clip-desc").textContent =
+    `${name}: ${fmtTime(state.audio.start)}\u2013${fmtTime(state.audio.start + state.audio.length)} ` +
+    `of ${fmtTime(duration)} (${state.audio.length.toFixed(1)} s), mixed to mono at ${state.audio.sr / 1000} kHz.`;
+  drawOverview();
+}
+
+function selectSource(which) {
+  state.source = which;
+  $("file-row").hidden = which !== "file";
+  if (which === "notes") loadNotes();
+  else if (state.decoded[which]) showAudio(state.decoded[which]);
+  else if (which === "song") loadSong();
+  else {
+    state.audio = null;
+    $("timespan").hidden = true;
+    $("clip-desc").textContent = "Choose an MP3, Ogg, WAV or FLAC file.";
+  }
+}
+
+// --- Timespan overview: drag the selection, or its edges ----------------------
+
+let overviewCache = null; // {width, cols} for the whole file
+
+function drawOverview() {
+  if (!state.audio || $("timespan").hidden) return;
+  const { ctx, width, height } = setupCanvas($("overview"));
+  const w = Math.floor(width);
+  if (overviewCache?.width !== w) overviewCache = { width: w, cols: columns(state.audio.samples, w) };
+  const { mins, maxs } = overviewCache.cols;
+  let range = 1e-9;
+  for (let c = 0; c < w; c++) range = Math.max(range, -mins[c], maxs[c]);
+
+  const x0 = (state.audio.start / state.audio.duration) * width;
+  const x1 = ((state.audio.start + state.audio.length) / state.audio.duration) * width;
+  ctx.fillStyle = css("--grid");
+  ctx.fillRect(x0, 0, Math.max(x1 - x0, 2), height);
+
+  for (let c = 0; c < w; c++) {
+    const inside = c >= x0 && c <= x1;
+    ctx.fillStyle = inside ? css("--series-1") : css("--text-2");
+    ctx.globalAlpha = inside ? 1 : 0.45;
+    const top = height / 2 - (maxs[c] / range) * (height / 2 - 2);
+    const bottom = height / 2 - (mins[c] / range) * (height / 2 - 2);
+    ctx.fillRect(c, top, 1, Math.max(1, bottom - top));
+  }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = css("--accent");
+  ctx.fillRect(x0 - 1, 0, 3, height);
+  ctx.fillRect(x1 - 1, 0, 3, height);
+}
+
+let drag = null; // {mode: "move" | "start" | "end", offset}
+
+function overviewTime(e) {
+  const rect = $("overview").getBoundingClientRect();
+  return ((e.clientX - rect.left) / rect.width) * state.audio.duration;
+}
+
+function hitTest(e) {
+  const rect = $("overview").getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const x0 = (state.audio.start / state.audio.duration) * rect.width;
+  const x1 = ((state.audio.start + state.audio.length) / state.audio.duration) * rect.width;
+  // A narrow selection (a few seconds of a long song) is all "move";
+  // its edges are grabbed just outside it instead.
+  const narrow = x1 - x0 < 24;
+  if (px >= x0 && px <= x1 && (narrow || (px - x0 > 8 && x1 - px > 8))) return "move";
+  if (Math.abs(px - x0) <= 8) return "start";
+  if (Math.abs(px - x1) <= 8) return "end";
+  return "outside";
+}
+
+$("overview").addEventListener("pointerdown", (e) => {
+  if (!state.audio) return;
+  const t = overviewTime(e);
+  let mode = hitTest(e);
+  if (mode === "outside") {
+    state.audio.start = t - state.audio.length / 2; // jump the selection here
+    syncSelection();
+    mode = "move";
+  }
+  drag = { mode, offset: t - state.audio.start };
+  $("overview").setPointerCapture(e.pointerId);
+});
+
+$("overview").addEventListener("pointermove", (e) => {
+  if (!state.audio) return;
+  if (!drag) {
+    const mode = hitTest(e);
+    $("overview").style.cursor = mode === "start" || mode === "end" ? "ew-resize" : mode === "move" ? "grab" : "pointer";
+    return;
+  }
+  const t = overviewTime(e);
+  const end = state.audio.start + state.audio.length;
+  if (drag.mode === "move") {
+    state.audio.start = t - drag.offset;
+  } else if (drag.mode === "start") {
+    const start = Math.min(Math.max(t, end - MAX_SECONDS, 0), end - 0.1);
+    state.audio.length = end - start;
+    state.audio.start = start;
+  } else {
+    state.audio.length = Math.min(Math.max(t - state.audio.start, 0.1), MAX_SECONDS);
+  }
+  syncSelection();
+});
+
+for (const type of ["pointerup", "pointercancel"]) {
+  $("overview").addEventListener(type, () => {
+    if (!drag) return;
+    drag = null;
+    sendSelectionSoon();
+  });
+}
+
+for (const id of ["start", "length"]) {
+  $(id).addEventListener("change", () => {
+    if (!state.audio) return;
+    state.audio[id] = Number($(id).value) || 0;
+    syncSelection();
+    sendSelectionSoon();
+  });
+}
+
 // --- Wiring ------------------------------------------------------------------
+
+for (const el of document.querySelectorAll('input[name="source"]')) {
+  el.addEventListener("change", () => selectSource(el.value));
+}
+$("file").addEventListener("change", () => loadFile($("file").files[0]));
+
+// Drop a file anywhere on the panel.
+const panel = $("panel");
+panel.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  panel.classList.add("dragover");
+});
+panel.addEventListener("dragleave", () => panel.classList.remove("dragover"));
+panel.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  panel.classList.remove("dragover");
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  $("source-file").checked = true;
+  state.source = "file";
+  $("file-row").hidden = false;
+  await loadFile(file);
+});
+
 
 for (const el of document.querySelectorAll('input[name="mode"], input[name="phase"], #bits')) {
   el.addEventListener("change", requestRender);
@@ -340,6 +613,13 @@ $("play-rebuilt").addEventListener("click", () => play("rebuilt"));
 $("play-original").addEventListener("click", () => play("original"));
 $("stop").addEventListener("click", stop);
 
+// Preset N: a count, a percentage of all coefficients, or "all".
+function presetCount(spec) {
+  if (spec === "all") return state.total;
+  if (spec.endsWith("%")) return Math.round((state.total * Number(spec.slice(0, -1))) / 100);
+  return Math.min(Number(spec), state.total);
+}
+
 for (const btn of document.querySelectorAll("#presets button")) {
   btn.disabled = true; // enabled once the clip is analysed
   btn.addEventListener("click", () => {
@@ -347,7 +627,7 @@ for (const btn of document.querySelectorAll("#presets button")) {
     $(`mode-${d.mode}`).checked = true;
     $(`phase-${d.phase}`).checked = true;
     $("bits").value = d.bits;
-    state.countOverride = Math.min(Number(d.n), state.total);
+    state.countOverride = presetCount(d.n);
     $("count").value = countToSlider(state.countOverride);
     requestRender();
     $("controls").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -357,8 +637,15 @@ for (const btn of document.querySelectorAll("#presets button")) {
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(drawAll, 100);
+  resizeTimer = setTimeout(() => {
+    drawAll();
+    drawOverview();
+  }, 100);
 });
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  drawAll();
+  drawOverview();
+});
 
-worker.postMessage({ type: "load-test", name: "notes" });
+$("max-seconds").textContent = MAX_SECONDS;
+loadNotes();

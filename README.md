@@ -89,9 +89,12 @@ how oscilloscope music works.
 
 https://saintaardvark.github.io/fourier-exploration/
 
-The plucked-notes clip, rebuilt live in your browser as you move the
-controls: first/largest N, phases, bits per knob, with waveform and
-spectrum plots. The maths is the same Python as the CLI
+A clip rebuilt live in your browser as you move the controls:
+first/largest N, phases, bits per knob, with waveform and spectrum plots.
+The clip can be the plucked notes, up to 30 s of "Switch Me On", or up to
+30 s of your own MP3/Ogg/WAV/FLAC (decoded in the browser at 44.1 kHz and
+mixed to mono; nothing is uploaded). Pick the timespan by dragging on an
+overview of the whole file. The maths is the same Python as the CLI
 (`series.py`, `signals.py`, `session.py`), run by
 [Pyodide](https://pyodide.org) in a Web Worker.
 
@@ -104,6 +107,10 @@ To run it locally:
 
     uv run python tools/build_site.py
     python -m http.server -d _site 8000    # then open http://localhost:8000/
+
+Browser numpy is 32-bit (wasm32), so array indices are int32: cast to
+float before multiplying an index by a sample rate, or it overflows on
+long clips.
 
 The Python modules the page loads must need only numpy: Pyodide has no
 `soundfile`, which is why the test signals live in `signals.py` rather

@@ -62,7 +62,9 @@ class Session:
         """Rebuild the clip; results land in self.y, self.kept and self.stats."""
         count = max(0, min(int(count), self.total))
         kept = series.SELECTORS[mode](self.coeffs, count)
-        highest = np.flatnonzero(kept).max(initial=0) * self.sr / self.n
+        # float(): in Pyodide (wasm32) numpy indices are int32, and
+        # index * sr overflows past ~48,000 bins.
+        highest = float(np.flatnonzero(kept).max(initial=0)) * self.sr / self.n
         # Fixed seed: moving a slider shouldn't reshuffle the random phases.
         kept = series.set_phase(kept, phase, self.n, np.random.default_rng(seed))
         if bits is not None:

@@ -50,6 +50,7 @@
   }
 
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; } /* beat .row's display: flex */
   body {
     margin: 0;
     background: var(--bg);
@@ -136,6 +137,25 @@
   dt { font-weight: 600; margin-top: 12px; }
   dd { margin: 2px 0 0; color: var(--text-2); }
   footer { margin-top: 48px; color: var(--text-2); font-size: 0.9rem; }
+  footer p { margin: 0 0 8px; }
+
+  .hint { color: var(--text-2); font-size: 0.9rem; }
+  .clip-desc { font-size: 0.95rem; }
+  input[type="file"] { font: inherit; font-size: 0.9rem; max-width: 100%; }
+  input[type="number"] {
+    font: inherit;
+    width: 6.5em;
+    padding: 4px 6px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+  }
+  .overview { height: 72px; cursor: pointer; touch-action: none; }
+  .timespan-inputs { margin-top: 8px; gap: 8px 10px; }
+  .timespan-inputs label { color: var(--text-2); font-size: 0.95rem; }
+  .pair { white-space: nowrap; }
+  .panel.dragover { outline: 2px dashed var(--accent); outline-offset: 4px; }
 </style>
 </head>
 <body>
@@ -152,13 +172,37 @@
     rather differently.
   </p>
 
-  <div class="panel" aria-live="polite">
-    <div id="status">Loading Python in your browser (about 15 MB the first time; cached after)…</div>
+  <div class="panel" id="panel">
+    <div id="status" role="status" aria-live="polite">Loading Python in your browser (about 15 MB the first time; cached after)…</div>
 
     <div class="controls" id="controls" hidden>
       <div class="row">
-        <span class="label">Clip</span>
-        <span>Three plucked notes (A, C♯, E) after a quarter-second of silence: 1 s, 44.1 kHz.</span>
+        <span class="label" id="source-label">Clip</span>
+        <div class="seg" role="radiogroup" aria-labelledby="source-label">
+          <input type="radio" name="source" id="source-notes" value="notes" checked><label for="source-notes">Plucked notes</label>
+          <input type="radio" name="source" id="source-song" value="song"><label for="source-song">A song</label>
+          <input type="radio" name="source" id="source-file" value="file"><label for="source-file">Your file</label>
+        </div>
+      </div>
+
+      <div class="row" id="file-row" hidden>
+        <span class="label"></span>
+        <input type="file" id="file" accept="audio/*,.mp3,.ogg,.oga,.wav,.flac,.m4a">
+        <span class="hint">…or drop one on this box. It's decoded in your browser; nothing is uploaded.</span>
+      </div>
+
+      <div class="row">
+        <span class="label"></span>
+        <span id="clip-desc" class="clip-desc"></span>
+      </div>
+
+      <div id="timespan" hidden>
+        <canvas id="overview" class="overview" aria-label="Whole file; the highlighted region is the clip being analysed. Drag it, or its edges."></canvas>
+        <div class="row timespan-inputs">
+          <span class="pair"><label for="start">Start</label> <input type="number" id="start" min="0" step="0.1" value="0"> s</span>
+          <span class="pair"><label for="length">Length</label> <input type="number" id="length" min="0.1" step="0.1" value="5"> s</span>
+          <span class="hint">up to <span id="max-seconds"></span> s; drag the highlight, or its edges</span>
+        </div>
       </div>
 
       <div class="row">
@@ -231,13 +275,13 @@
   <h2>Try this</h2>
   <div class="presets" id="presets">
     <button data-mode="first" data-n="100" data-phase="keep" data-bits="">Low-pass: first 100</button>
-    <button data-mode="first" data-n="1000" data-phase="keep" data-bits="">First 1,000</button>
+    <button data-mode="first" data-n="5%" data-phase="keep" data-bits="">First 5%</button>
     <button data-mode="top" data-n="10" data-phase="keep" data-bits="">Llama mode: largest 10</button>
     <button data-mode="top" data-n="100" data-phase="keep" data-bits="">Largest 100</button>
-    <button data-mode="top" data-n="22051" data-phase="zero" data-bits="">Zero phase</button>
-    <button data-mode="top" data-n="22051" data-phase="random" data-bits="">Random phase</button>
-    <button data-mode="top" data-n="2205" data-phase="keep" data-bits="8">10% at 8 bits</button>
-    <button data-mode="top" data-n="2205" data-phase="keep" data-bits="2">10% at 2 bits</button>
+    <button data-mode="top" data-n="all" data-phase="zero" data-bits="">Zero phase</button>
+    <button data-mode="top" data-n="all" data-phase="random" data-bits="">Random phase</button>
+    <button data-mode="top" data-n="10%" data-phase="keep" data-bits="8">10% at 8 bits</button>
+    <button data-mode="top" data-n="10%" data-phase="keep" data-bits="2">10% at 2 bits</button>
   </div>
 
   <h2>What's going on</h2>
@@ -245,16 +289,17 @@
     <dt>Coefficients are sine waves</dt>
     <dd>
       A clip of length T is treated as one loop of a repeating signal.
-      Coefficient k is a sine wave at k / T Hz lasting the whole clip. This clip
-      is 1 s long, so the coefficients sit 1 Hz apart: 22,051 of them, or 44,102
-      knobs.
+      Coefficient k is a sine wave at k / T Hz lasting the whole clip. The
+      plucked notes are 1 s long, so their coefficients sit 1 Hz apart: 22,051
+      of them, or 44,102 knobs. A 5 s clip has five times as many, 0.2 Hz
+      apart.
     </dd>
 
     <dt>First N is a low-pass filter</dt>
     <dd>
-      Keeping coefficients 0 to N−1 keeps everything below N Hz and nothing
-      above. The notes start at 440 Hz, so "First 100" is silence. Bass comes
-      back first; brightness last.
+      Keeping coefficients 0 to N−1 keeps everything below N / T Hz and nothing
+      above. The plucked notes start at 440 Hz, so "First 100" is silence; on a
+      5 s clip it reaches only 20 Hz. Bass comes back first; brightness last.
     </dd>
 
     <dt>Largest N is the llama</dt>
@@ -283,6 +328,13 @@
       the knob settings would cost to send; a typical MP3 is 128 kbps.
     </dd>
 
+    <dt>Longer clips</dt>
+    <dd>
+      Try 1 s, then 5 s, then 30 s of the same music at the same N. The longer
+      the clip, the more coefficients it takes just to reach the bass, and
+      the further each kept wave smears: pre-echo can arrive seconds early.
+    </dd>
+
     <dt>Why MP3 doesn't do it this way</dt>
     <dd>
       Real codecs chop the sound into ~20 ms frames and do this per frame, so a
@@ -292,6 +344,12 @@
   </dl>
 
   <footer>
+    <p>
+      "A song" is <a href="https://www.silvermansound.com/free-music/switch-me-on">"Switch Me On"</a>
+      © 2019 Shane Ivers, <a href="https://www.silvermansound.com">silvermansound.com</a>,
+      licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.
+      The rebuilt versions you hear are modifications of it.
+    </p>
     The maths runs in your browser: Python and numpy via
     <a href="https://pyodide.org">Pyodide</a>, using the same code as the
     command-line tool in <a href="https://github.com/saintaardvark/fourier-exploration">the repository</a>.
