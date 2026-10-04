@@ -155,6 +155,15 @@
   .timespan-inputs { margin-top: 8px; gap: 8px 10px; }
   .timespan-inputs label { color: var(--text-2); font-size: 0.95rem; }
   .pair { white-space: nowrap; }
+  .check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .check input { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; }
+  .playhead {
+    position: absolute;
+    width: 2px;
+    background: var(--text);
+    opacity: 0.7;
+    pointer-events: none;
+  }
   .panel.dragover { outline: 2px dashed var(--accent); outline-offset: 4px; }
 </style>
 </head>
@@ -245,6 +254,7 @@
         <button class="primary" id="play-rebuilt"><span class="swatch" style="background: var(--series-2)"></span>Play rebuilt</button>
         <button id="play-original"><span class="swatch" style="background: var(--series-1)"></span>Play original</button>
         <button id="stop">Stop</button>
+        <label class="check"><input type="checkbox" id="loop"> Loop</label>
       </div>
 
       <div class="stats" id="stats"></div>
@@ -257,6 +267,7 @@
           <span><i class="swatch" style="background: var(--series-2)"></i>Rebuilt</span>
         </div>
         <canvas id="wave" aria-label="Waveform of the original and rebuilt clip"></canvas>
+        <div class="playhead" id="playhead" hidden></div>
         <div class="tip" id="wave-tip"></div>
       </div>
 
@@ -292,7 +303,8 @@
       Coefficient k is a sine wave at k / T Hz lasting the whole clip. The
       plucked notes are 1 s long, so their coefficients sit 1 Hz apart: 22,051
       of them, or 44,102 knobs. A 5 s clip has five times as many, 0.2 Hz
-      apart.
+      apart. Turn on <em>Loop</em> to hear exactly the repeating signal the
+      series describes.
     </dd>
 
     <dt>First N is a low-pass filter</dt>

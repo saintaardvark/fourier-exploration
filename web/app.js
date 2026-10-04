@@ -160,22 +160,42 @@ let audioCtx = null;
 const getAudioCtx = () => (audioCtx ??= new AudioContext({ sampleRate: SR }));
 let source = null;
 let playing = null; // "original" | "rebuilt" | null
+let startedAt = 0; // context time at which the buffer's sample 0 played
 
+// Seconds into the clip the current playback has reached.
+function position() {
+  if (!playing) return 0;
+  const elapsed = audioCtx.currentTime - startedAt;
+  const duration = source.buffer.duration;
+  return source.loop ? elapsed % duration : Math.min(elapsed, duration);
+}
+
+// Play the original or rebuilt clip. If something is already playing, carry
+// on from the same point, so switching between the two (or hearing a new
+// rebuild after moving a control) is a direct A/B comparison.
 function play(which) {
   const ctx = getAudioCtx();
   ctx.resume();
+  const offset = playing ? position() : 0;
   stop();
   const samples = which === "original" ? state.original : state.rebuilt;
   const buffer = ctx.createBuffer(1, samples.length, state.sr);
   buffer.copyToChannel(samples, 0);
   source = ctx.createBufferSource();
   source.buffer = buffer;
+  source.loop = $("loop").checked;
   source.connect(ctx.destination);
   source.onended = () => {
-    if (source?.buffer === buffer) playing = null;
+    if (source?.buffer === buffer) {
+      playing = null;
+      source = null;
+    }
   };
-  source.start();
+  const at = Math.min(offset, buffer.duration - 0.01);
+  source.start(0, Math.max(at, 0));
+  startedAt = ctx.currentTime - at;
   playing = which;
+  requestAnimationFrame(movePlayhead);
 }
 
 function stop() {
@@ -185,6 +205,21 @@ function stop() {
     source = null;
   }
   playing = null;
+  $("playhead").hidden = true;
+}
+
+function movePlayhead() {
+  const head = $("playhead");
+  if (!playing || !source) {
+    head.hidden = true;
+    return;
+  }
+  const canvas = $("wave");
+  head.hidden = false;
+  head.style.left = `${canvas.offsetLeft + (position() / source.buffer.duration) * canvas.clientWidth}px`;
+  head.style.top = `${canvas.offsetTop}px`;
+  head.style.height = `${canvas.offsetHeight}px`;
+  requestAnimationFrame(movePlayhead);
 }
 
 // --- Charts ------------------------------------------------------------------
@@ -612,6 +647,14 @@ $("count").addEventListener("input", () => {
 $("play-rebuilt").addEventListener("click", () => play("rebuilt"));
 $("play-original").addEventListener("click", () => play("original"));
 $("stop").addEventListener("click", stop);
+$("loop").addEventListener("change", () => {
+  if (!source) return;
+  // Takes effect mid-play. Re-anchor so position() stays right once the
+  // modulo (looping) or clamp (not looping) changes over.
+  const pos = position();
+  source.loop = $("loop").checked;
+  startedAt = audioCtx.currentTime - pos;
+});
 
 // Preset N: a count, a percentage of all coefficients, or "all".
 function presetCount(spec) {
